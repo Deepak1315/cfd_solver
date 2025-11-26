@@ -233,8 +233,8 @@
         </h1>
         
         <div class="control-group">
-            <label>Flow Speed <span id="val-speed">0.10</span></label>
-            <div style="font-size: 0.65rem; color: #666; margin-bottom: 5px;">(lattice units)</div>
+            <label>Flow Speed <span id="val-speed">0.17</span></label>
+            <div style="font-size: 0.65rem; color: #666; margin-bottom: 5px;">(Mach)</div>
             <input type="range" id="speed" min="0.01" max="0.15" step="0.001" value="0.1">
         </div>
 
@@ -387,6 +387,7 @@ function updateObstacle() {
     const thickness = parseFloat(ui.thick.value);
     const camber = parseFloat(ui.camber.value);
     
+    // --- FIX: Restored original thickness calculation logic ---
     const c_x = Math.max(-0.9, Math.min(-0.1, -thickness)); 
     const c_y = Math.max(-0.4, Math.min(0.4, camber));
     const R = Math.sqrt((1 - c_x)**2 + c_y**2); 
@@ -425,9 +426,13 @@ function updateObstacle() {
     // Initialize fluid inside obstacle
     const safeEq = equilibrium(1.0, 0.0, 0.0);
 
-    // Use faster sampling for obstacle update
-    for (let y = Math.max(1, Math.floor(centerY - 100)); y < Math.min(ly - 1, Math.floor(centerY + 100)); y++) {
-        for (let x = Math.max(0, Math.floor(centerX - 100)); x < Math.min(lx, Math.floor(centerX + 100)); x++) {
+    // --- CRITICAL FIX: Expanded bounding box ---
+    // Previous value of 100 was too small, clipping the nose when thickness increased.
+    const boundsX = 220; 
+    const boundsY = 160;
+
+    for (let y = Math.max(1, Math.floor(centerY - boundsY)); y < Math.min(ly - 1, Math.floor(centerY + boundsY)); y++) {
+        for (let x = Math.max(0, Math.floor(centerX - boundsX)); x < Math.min(lx, Math.floor(centerX + boundsX)); x++) {
             const i = x + y * lx;
             if (pointInPolygon(x, y, poly)) {
                 barrier[i] = 1;
@@ -784,7 +789,11 @@ function debouncedParameterChange() {
 }
 
 function updateUIValues() {
-    document.getElementById('val-speed').innerText = parseFloat(ui.speed.value).toFixed(3);
+    const u = parseFloat(ui.speed.value);
+    // In LBM D2Q9, speed of sound cs = 1/sqrt(3). Mach = u / cs = u * sqrt(3).
+    const mach = u * Math.sqrt(3);
+    document.getElementById('val-speed').innerText = mach.toFixed(3);
+
     document.getElementById('val-visc').innerText = parseFloat(ui.visc.value).toFixed(3);
     document.getElementById('val-aoa').innerText = (-parseFloat(ui.aoa.value)) + "°"; // Fixed: invert the display
     document.getElementById('val-camber').innerText = parseFloat(ui.camber.value).toFixed(2);
