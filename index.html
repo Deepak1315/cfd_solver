@@ -197,11 +197,26 @@
             color: #ffaa00;
             background: rgba(255, 170, 0, 0.05);
         }
+
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.8);
+            color: var(--accent-color);
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            z-index: 1000;
+            display: none;
+        }
     </style>
 </head>
 <body>
 
     <canvas id="simCanvas"></canvas>
+    <div class="loading" id="loading">Updating...</div>
 
     <div id="controls">
         <h1>
@@ -216,7 +231,6 @@
 
         <div class="control-group">
             <label>Viscosity (1/Re) <span id="val-visc">0.02</span></label>
-            <!-- Min Visc increased to 0.02 for unconditional stability -->
             <input type="range" id="visc" min="0.02" max="0.15" step="0.001" value="0.020">
         </div>
 
@@ -262,10 +276,8 @@
 
 <script>
 /**
- * PURE JAVASCRIPT LBM CFD SOLVER (STABLE VERSION)
- * Method: Lattice Boltzmann D2Q9
- * Resolution: 800x320 (256k cells)
- * Includes Velocity Clamping & Soft Restarts
+ * OPTIMIZED JAVASCRIPT LBM CFD SOLVER
+ * Fast parameter updates with background recalculation
  */
 
 const lx = 800; 
@@ -290,11 +302,15 @@ let viscosity = 0.02;
 
 let plotType = "speed";
 let running = true;
+let animationId = null;
+let isUpdating = false;
+let updateRequested = false;
 
 const canvas = document.getElementById('simCanvas');
 const ctx = canvas.getContext('2d', { alpha: false });
 const imgData = ctx.createImageData(lx, ly);
 const buf32 = new Uint32Array(imgData.data.buffer);
+const loading = document.getElementById('loading');
 
 const ui = {
     speed: document.getElementById('speed'),
@@ -312,14 +328,14 @@ function init() {
     canvas.width = lx;
     canvas.height = ly;
     
-    // Initialize with equilibrium distribution - FIXED: Proper left-to-right flow
+    // Fast initialization with equilibrium distribution
+    const eq = equilibrium(1.0, u0, 0.0);
     for (let i = 0; i < totalCells; i++) {
         rho[i] = 1.0;
-        ux[i] = u0;  // Positive flow from left to right
+        ux[i] = u0;
         uy[i] = 0.0;
         barrier[i] = 0;
         
-        const eq = equilibrium(1.0, u0, 0.0);
         for (let d = 0; d < 9; d++) {
             f[i * 9 + d] = eq[d];
             newF[i * 9 + d] = eq[d];
@@ -328,7 +344,12 @@ function init() {
 
     updateObstacle();
     lastTime = performance.now();
-    requestAnimationFrame(step);
+    
+    if (running) {
+        startAnimation();
+    } else {
+        render();
+    }
 }
 
 function updateObstacle() {
@@ -336,15 +357,14 @@ function updateObstacle() {
 
     // Top/Bottom Walls
     for (let x = 0; x < lx; x++) {
-        barrier[x] = 1;                 // Top wall
-        barrier[x + (ly - 1) * lx] = 1; // Bottom wall
+        barrier[x] = 1;
+        barrier[x + (ly - 1) * lx] = 1;
     }
 
     const angle = parseFloat(ui.aoa.value) * (Math.PI / 180);
     const thickness = parseFloat(ui.thick.value);
     const camber = parseFloat(ui.camber.value);
     
-    // Fixed: Handle edge cases for Joukowski transformation
     const c_x = Math.max(-0.9, Math.min(-0.1, -thickness)); 
     const c_y = Math.max(-0.4, Math.min(0.4, camber));
     const R = Math.sqrt((1 - c_x)**2 + c_y**2); 
@@ -354,14 +374,13 @@ function updateObstacle() {
     const scale = 50;
 
     const poly = [];
-    const steps = 200; 
+    const steps = 100; // Reduced for faster computation
     for (let s = 0; s < steps; s++) {
         const theta = (s / steps) * 2 * Math.PI;
         const zeta_x = c_x + R * Math.cos(theta);
         const zeta_y = c_y + R * Math.sin(theta);
         const denom = zeta_x*zeta_x + zeta_y*zeta_y;
         
-        // Fixed: Check for zero denominator
         if (Math.abs(denom) < 1e-6) continue;
         
         let z_x = zeta_x * (1 + 1/denom);
@@ -376,17 +395,16 @@ function updateObstacle() {
         });
     }
 
-    // Fixed: Ensure polygon is valid
     if (poly.length < 3) {
-        console.warn("Invalid polygon, using default");
         poly.push({x: centerX, y: centerY - 20}, {x: centerX + 40, y: centerY}, {x: centerX, y: centerY + 20});
     }
 
-    // Initialize "Dark Fluid" (Fluid inside obstacle)
+    // Initialize fluid inside obstacle
     const safeEq = equilibrium(1.0, 0.0, 0.0);
 
-    for (let y = 1; y < ly - 1; y++) {
-        for (let x = 0; x < lx; x++) {
+    // Use faster sampling for obstacle update
+    for (let y = Math.max(1, Math.floor(centerY - 100)); y < Math.min(ly - 1, Math.floor(centerY + 100)); y++) {
+        for (let x = Math.max(0, Math.floor(centerX - 100)); x < Math.min(lx, Math.floor(centerX + 100)); x++) {
             const i = x + y * lx;
             if (pointInPolygon(x, y, poly)) {
                 barrier[i] = 1;
@@ -406,7 +424,6 @@ function pointInPolygon(x, y, poly) {
         const xi = poly[i].x, yi = poly[i].y;
         const xj = poly[j].x, yj = poly[j].y;
         
-        // Fixed: Handle edge cases with vertical alignment
         const intersect = ((yi > y) !== (yj > y)) &&
             (x < (xj - xi) * (y - yi) / ((yj - yi) || 1) + xi);
         if (intersect) inside = !inside;
@@ -424,16 +441,80 @@ function equilibrium(rho, ux, uy) {
     return eq;
 }
 
+function fastReset() {
+    // Fast reset to equilibrium without full reinitialization
+    const eq = equilibrium(1.0, u0, 0.0);
+    const startTime = performance.now();
+    
+    for (let i = 0; i < totalCells; i++) {
+        if (!barrier[i]) {
+            rho[i] = 1.0;
+            ux[i] = u0;
+            uy[i] = 0.0;
+            
+            for (let d = 0; d < 9; d++) {
+                f[i * 9 + d] = eq[d];
+                newF[i * 9 + d] = eq[d];
+            }
+        }
+        
+        // Check timeout every 10000 cells to avoid blocking
+        if (i % 10000 === 0 && performance.now() - startTime > 16) {
+            // Yield to prevent blocking
+            setTimeout(() => fastResetContinue(i + 1, eq, startTime), 0);
+            return;
+        }
+    }
+    
+    // If we get here, we finished without interruption
+    updateComplete();
+}
+
+function fastResetContinue(startIndex, eq, startTime) {
+    for (let i = startIndex; i < totalCells; i++) {
+        if (!barrier[i]) {
+            rho[i] = 1.0;
+            ux[i] = u0;
+            uy[i] = 0.0;
+            
+            for (let d = 0; d < 9; d++) {
+                f[i * 9 + d] = eq[d];
+                newF[i * 9 + d] = eq[d];
+            }
+        }
+        
+        if (i % 10000 === 0 && performance.now() - startTime > 16) {
+            setTimeout(() => fastResetContinue(i + 1, eq, startTime), 0);
+            return;
+        }
+    }
+    
+    updateComplete();
+}
+
+function updateComplete() {
+    isUpdating = false;
+    loading.style.display = 'none';
+    
+    if (updateRequested) {
+        updateRequested = false;
+        handleParameterChange();
+    } else if (running) {
+        startAnimation();
+    } else {
+        render();
+    }
+}
+
 function step() {
-    if (!running) {
-        requestAnimationFrame(step);
+    if (!running || isUpdating) {
         return;
     }
 
     u0 = parseFloat(ui.speed.value);
     viscosity = parseFloat(ui.visc.value);
     const baseTau = 3.0 * viscosity + 0.5;
-    const stepsPerFrame = 4; 
+    const stepsPerFrame = 2; // Reduced for faster response
 
     for (let s = 0; s < stepsPerFrame; s++) {
         
@@ -458,7 +539,6 @@ function step() {
                 v = f[idxBase+7]; sumRho += v; sumUx -= v; sumUy -= v;
                 v = f[idxBase+8]; sumRho += v; sumUx += v; sumUy -= v;
 
-                // Fixed: Check for valid density
                 if (Math.abs(sumRho) < 1e-6) sumRho = 1.0;
                 
                 rho[i] = sumRho;
@@ -466,7 +546,6 @@ function step() {
                 let u_x = sumUx * invRho;
                 let u_y = sumUy * invRho;
 
-                // --- VELOCITY CLAMPING (STABILITY FIX) ---
                 const uSq = u_x*u_x + u_y*u_y;
                 if (uSq > 0.15) { 
                     const scale = Math.sqrt(0.15 / uSq);
@@ -484,7 +563,6 @@ function step() {
                     const feq = weights[d] * sumRho * (1 + 3*eu + 4.5*eu*eu - 1.5*u2);
                     f[idxBase + d] += (feq - f[idxBase + d]) / baseTau;
                     
-                    // Fixed: Prevent extreme values
                     if (!isFinite(f[idxBase + d]) || Math.abs(f[idxBase + d]) > 1e6) {
                         f[idxBase + d] = weights[d] * sumRho;
                     }
@@ -507,7 +585,6 @@ function step() {
                     if (nextX >= 0 && nextX < lx && nextY >= 0 && nextY < ly) {
                         const nextI = nextX + nextY * lx;
                         if (barrier[nextI]) {
-                            // Bounce-back boundary condition for obstacles
                             newF[i * 9 + opp[d]] = f[i * 9 + d];
                         } else {
                             newF[nextI * 9 + d] = f[i * 9 + d];
@@ -517,64 +594,25 @@ function step() {
             }
         }
 
-        // 3. BOUNDARIES - FIXED: Simple but effective boundary conditions
+        // 3. BOUNDARIES
         for (let y = 0; y < ly; y++) {
-            // Left boundary (inlet) - Fixed velocity
             const iIn = y * lx;
-            if (!barrier[iIn]) {
-                const eq = equilibrium(1.0, u0, 0.0);
-                for (let d = 0; d < 9; d++) {
-                    newF[iIn * 9 + d] = eq[d];
-                }
-            }
-            
-            // Right boundary (outlet) - Zero gradient / Neumann condition
             const iOut = (lx - 1) + y * lx;
-            if (!barrier[iOut]) {
-                const iPrev = (lx - 2) + y * lx;
-                // Copy distributions from previous cell (zero gradient)
-                for (let d = 0; d < 9; d++) {
-                    newF[iOut * 9 + d] = newF[iPrev * 9 + d];
-                }
-                
-                // Optional: Slight pressure correction to help flow
-                let sumRho = 0;
-                for (let d = 0; d < 9; d++) sumRho += newF[iOut * 9 + d];
-                if (sumRho < 0.95) {
-                    const correction = (1.0 - sumRho) / 9.0;
-                    for (let d = 0; d < 9; d++) newF[iOut * 9 + d] += correction;
-                }
-            }
-        }
+            const iPrev = (lx - 2) + y * lx;
 
-        // Top and bottom walls - bounce back
-        for (let x = 0; x < lx; x++) {
-            // Top wall (y=0)
-            const iTop = x;
-            if (barrier[iTop]) {
-                // Simple bounce-back for walls
-                for (let d = 0; d < 9; d++) {
-                    if (ey[d] > 0) { // Directions going upward
-                        newF[iTop * 9 + opp[d]] = f[iTop * 9 + d];
-                    }
-                }
+            if (!barrier[iIn]) {
+                const eq = equilibrium(1.0, u0, 0);
+                for (let d = 0; d < 9; d++) newF[iIn*9+d] = eq[d];
             }
             
-            // Bottom wall (y=ly-1)
-            const iBottom = x + (ly - 1) * lx;
-            if (barrier[iBottom]) {
-                for (let d = 0; d < 9; d++) {
-                    if (ey[d] < 0) { // Directions going downward
-                        newF[iBottom * 9 + opp[d]] = f[iBottom * 9 + d];
-                    }
-                }
+            if (!barrier[iOut]) {
+                for (let d = 0; d < 9; d++) newF[iOut*9+d] = newF[iPrev*9+d];
             }
         }
 
         let temp = f; f = newF; newF = temp;
     }
     
-    // Safety Check: Auto-recover if NaN leaked through
     if (!isFinite(rho[lx*ly/2])) {
         console.warn("NaN/Infinity Detected. Restarting.");
         init();
@@ -583,7 +621,24 @@ function step() {
 
     render();
     updateStats();
-    requestAnimationFrame(step);
+    
+    if (running && !isUpdating) {
+        animationId = requestAnimationFrame(step);
+    }
+}
+
+function startAnimation() {
+    if (animationId) {
+        cancelAnimationFrame(animationId);
+    }
+    animationId = requestAnimationFrame(step);
+}
+
+function stopAnimation() {
+    if (animationId) {
+        cancelAnimationFrame(animationId);
+        animationId = null;
+    }
 }
 
 // --- RENDERING ---
@@ -609,10 +664,8 @@ function render() {
     plotType = ui.plotType.value;
     const isCurl = plotType === "curl";
     
-    // Use fixed ranges for better visualization
     const minSpeed = 0;
-    const maxSpeed = u0 * 2.0; // Fixed range based on inflow speed
-    
+    const maxSpeed = u0 * 2.0;
     const minCurl = -0.1;
     const maxCurl = 0.1;
     
@@ -621,7 +674,7 @@ function render() {
             const i = x + y * lx;
             
             if (barrier[i]) {
-                buf32[i] = 0xFF404040; // Dark gray for obstacles
+                buf32[i] = 0xFF404040;
                 continue;
             }
 
@@ -654,37 +707,85 @@ function updateStats() {
     }
 }
 
-// --- INTERACTION ---
+// --- FAST PARAMETER UPDATE SYSTEM ---
 
 let updateTimeout;
-function debouncedUpdate() {
-    clearTimeout(updateTimeout);
-    updateTimeout = setTimeout(() => {
-        updateUI();
-    }, 20);
+let parameterChangeTimeout;
+
+function handleParameterChange() {
+    if (isUpdating) {
+        updateRequested = true;
+        return;
+    }
+    
+    isUpdating = true;
+    loading.style.display = 'block';
+    
+    // Stop current animation immediately
+    stopAnimation();
+    
+    // Update UI values immediately
+    updateUIValues();
+    
+    // Start fast update with timeout protection
+    const updateStartTime = performance.now();
+    
+    // Use setTimeout to yield to browser and prevent blocking
+    setTimeout(() => {
+        updateObstacle();
+        fastReset();
+        
+        // Safety timeout - if update takes more than 800ms, force completion
+        setTimeout(() => {
+            if (isUpdating) {
+                console.warn("Update taking too long, forcing completion");
+                updateComplete();
+            }
+        }, 800);
+    }, 0);
 }
 
-function updateUI() {
+function debouncedParameterChange() {
+    clearTimeout(parameterChangeTimeout);
+    parameterChangeTimeout = setTimeout(handleParameterChange, 50);
+}
+
+function updateUIValues() {
     document.getElementById('val-speed').innerText = parseFloat(ui.speed.value).toFixed(3);
     document.getElementById('val-visc').innerText = parseFloat(ui.visc.value).toFixed(3);
     document.getElementById('val-aoa').innerText = ui.aoa.value + "°";
-    document.getElementById('val-camber').innerText = ui.camber.value;
-    document.getElementById('val-thick').innerText = ui.thick.value;
-    updateObstacle();
+    document.getElementById('val-camber').innerText = parseFloat(ui.camber.value).toFixed(2);
+    document.getElementById('val-thick').innerText = parseFloat(ui.thick.value).toFixed(2);
 }
 
+// Event listeners
 ['speed', 'visc', 'aoa', 'camber', 'thick'].forEach(id => {
-    document.getElementById(id).addEventListener('input', debouncedUpdate);
+    document.getElementById(id).addEventListener('input', () => {
+        updateUIValues();
+        debouncedParameterChange();
+    });
 });
 
-document.getElementById('resetBtn').addEventListener('click', init);
+ui.plotType.addEventListener('change', () => {
+    render();
+});
+
+document.getElementById('resetBtn').addEventListener('click', () => {
+    stopAnimation();
+    init();
+});
 
 ui.toggleBtn.addEventListener('click', () => {
     running = !running;
     ui.toggleBtn.innerText = running ? "Pause" : "Resume";
     ui.toggleBtn.classList.toggle('paused', !running);
     ui.status.innerText = running ? "RUNNING" : "PAUSED";
-    if (running) step();
+    
+    if (running && !isUpdating) {
+        startAnimation();
+    } else {
+        stopAnimation();
+    }
 });
 
 // Start
