@@ -32,14 +32,15 @@
             width: 100%;
             height: 100%;
             object-fit: contain;
-            image-rendering: pixelated; 
+            /* Remove pixelated rendering for better quality */
+            image-rendering: auto;
         }
 
         #controls {
             position: absolute;
             top: 20px;
-            left: 20px;
-            width: 280px;
+            right: 20px; /* Changed from left to right */
+            width: 300px; /* Slightly wider to accommodate units */
             padding: 24px;
             background-color: var(--panel-bg);
             backdrop-filter: blur(16px);
@@ -82,6 +83,13 @@
             margin-bottom: 8px;
             color: #bbb;
             letter-spacing: 0.5px;
+        }
+
+        .unit {
+            font-size: 0.65rem;
+            color: #666;
+            font-style: italic;
+            margin-left: 4px;
         }
 
         input[type="range"] {
@@ -226,26 +234,31 @@
         
         <div class="control-group">
             <label>Flow Speed <span id="val-speed">0.10</span></label>
+            <div style="font-size: 0.65rem; color: #666; margin-bottom: 5px;">(lattice units)</div>
             <input type="range" id="speed" min="0.01" max="0.15" step="0.001" value="0.1">
         </div>
 
         <div class="control-group">
             <label>Viscosity (1/Re) <span id="val-visc">0.02</span></label>
+            <div style="font-size: 0.65rem; color: #666; margin-bottom: 5px;">(dimensionless)</div>
             <input type="range" id="visc" min="0.02" max="0.15" step="0.001" value="0.020">
         </div>
 
         <div class="control-group">
-            <label>Angle of Attack <span id="val-aoa">10°</span></label>
-            <input type="range" id="aoa" min="-20" max="20" step="1" value="10">
+            <label>Angle of Attack <span id="val-aoa">-10°</span></label>
+            <div style="font-size: 0.65rem; color: #666; margin-bottom: 5px;">(degrees)</div>
+            <input type="range" id="aoa" min="-20" max="20" step="1" value="-10">
         </div>
         
         <div class="control-group">
             <label>Camber <span id="val-camber">0.1</span></label>
+            <div style="font-size: 0.65rem; color: #666; margin-bottom: 5px;">(fraction of chord)</div>
             <input type="range" id="camber" min="-0.5" max="0.5" step="0.01" value="0.1">
         </div>
 
         <div class="control-group">
             <label>Thickness <span id="val-thick">0.08</span></label>
+            <div style="font-size: 0.65rem; color: #666; margin-bottom: 5px;">(fraction of chord)</div>
             <input type="range" id="thick" min="0.01" max="0.3" step="0.01" value="0.08">
         </div>
 
@@ -264,7 +277,7 @@
         </div>
 
         <div class="stats-row">
-            <span id="fps">FPS: 0</span>
+            <span id="steps">Steps: 0</span>
             <span id="status">RUNNING</span>
         </div>
         
@@ -278,6 +291,7 @@
 /**
  * OPTIMIZED JAVASCRIPT LBM CFD SOLVER
  * Fast parameter updates with background recalculation
+ * Optimized for 60 FPS performance
  */
 
 const lx = 800; 
@@ -306,8 +320,15 @@ let animationId = null;
 let isUpdating = false;
 let updateRequested = false;
 
+// Performance optimization variables
+let stepCount = 0;
+let lastFrameTime = performance.now();
+const targetFrameTime = 1000 / 60; // 60 FPS target
+
 const canvas = document.getElementById('simCanvas');
 const ctx = canvas.getContext('2d', { alpha: false });
+// Improved rendering quality
+ctx.imageSmoothingEnabled = false; // Keep sharp for pixel data
 const imgData = ctx.createImageData(lx, ly);
 const buf32 = new Uint32Array(imgData.data.buffer);
 const loading = document.getElementById('loading');
@@ -318,7 +339,7 @@ const ui = {
     aoa: document.getElementById('aoa'),
     camber: document.getElementById('camber'),
     thick: document.getElementById('thick'),
-    fps: document.getElementById('fps'),
+    steps: document.getElementById('steps'),
     status: document.getElementById('status'),
     plotType: document.getElementById('plotType'),
     toggleBtn: document.getElementById('toggleBtn')
@@ -343,7 +364,8 @@ function init() {
     }
 
     updateObstacle();
-    lastTime = performance.now();
+    stepCount = 0; // Reset step counter on init
+    lastFrameTime = performance.now();
     
     if (running) {
         startAnimation();
@@ -374,7 +396,8 @@ function updateObstacle() {
     const scale = 50;
 
     const poly = [];
-    const steps = 100; // Reduced for faster computation
+    // Increased resolution for smoother airfoil shape
+    const steps = 400; // Increased from 100 for sharper airfoil
     for (let s = 0; s < steps; s++) {
         const theta = (s / steps) * 2 * Math.PI;
         const zeta_x = c_x + R * Math.cos(theta);
@@ -514,7 +537,19 @@ function step() {
     u0 = parseFloat(ui.speed.value);
     viscosity = parseFloat(ui.visc.value);
     const baseTau = 3.0 * viscosity + 0.5;
-    const stepsPerFrame = 2; // Reduced for faster response
+    
+    // Adaptive steps per frame for 60 FPS target
+    const currentTime = performance.now();
+    const deltaTime = currentTime - lastFrameTime;
+    lastFrameTime = currentTime;
+    
+    // Adjust steps per frame based on performance
+    // Start with 1 step and increase if we have time budget
+    let stepsPerFrame = 1;
+    if (deltaTime < targetFrameTime * 0.7) {
+        // If we're running fast, do more steps for better simulation quality
+        stepsPerFrame = 2;
+    }
 
     for (let s = 0; s < stepsPerFrame; s++) {
         
@@ -611,6 +646,9 @@ function step() {
         }
 
         let temp = f; f = newF; newF = temp;
+        
+        // Increment step counter after each complete simulation step
+        stepCount++;
     }
     
     if (!isFinite(rho[lx*ly/2])) {
@@ -631,6 +669,7 @@ function startAnimation() {
     if (animationId) {
         cancelAnimationFrame(animationId);
     }
+    lastFrameTime = performance.now();
     animationId = requestAnimationFrame(step);
 }
 
@@ -642,9 +681,6 @@ function stopAnimation() {
 }
 
 // --- RENDERING ---
-
-let lastTime = performance.now();
-let frameCount = 0;
 
 function getSciColor(val, min, max) {
     if (!isFinite(val)) return 0xFF000000; 
@@ -697,14 +733,8 @@ function render() {
 }
 
 function updateStats() {
-    const now = performance.now();
-    const delta = now - lastTime;
-    frameCount++;
-    if (delta >= 1000) {
-        ui.fps.innerText = `FPS: ${(frameCount * 1000 / delta).toFixed(1)}`;
-        frameCount = 0;
-        lastTime = now;
-    }
+    // Update step counter display
+    ui.steps.innerText = `Steps: ${stepCount.toLocaleString()}`;
 }
 
 // --- FAST PARAMETER UPDATE SYSTEM ---
@@ -726,6 +756,9 @@ function handleParameterChange() {
     
     // Update UI values immediately
     updateUIValues();
+    
+    // Reset step counter when parameters change
+    stepCount = 0;
     
     // Start fast update with timeout protection
     const updateStartTime = performance.now();
@@ -753,7 +786,7 @@ function debouncedParameterChange() {
 function updateUIValues() {
     document.getElementById('val-speed').innerText = parseFloat(ui.speed.value).toFixed(3);
     document.getElementById('val-visc').innerText = parseFloat(ui.visc.value).toFixed(3);
-    document.getElementById('val-aoa').innerText = ui.aoa.value + "°";
+    document.getElementById('val-aoa').innerText = (-parseFloat(ui.aoa.value)) + "°"; // Fixed: invert the display
     document.getElementById('val-camber').innerText = parseFloat(ui.camber.value).toFixed(2);
     document.getElementById('val-thick').innerText = parseFloat(ui.thick.value).toFixed(2);
 }
